@@ -2,18 +2,20 @@
 
 namespace RaftCore
 {
-    public struct RaftNodeId : IEquatable<RaftNodeId>
+    public struct NodeId : IEquatable<NodeId>
     {
+        public static readonly NodeId Null = new NodeId(null);
+
         private readonly string value;
 
-        public RaftNodeId(string value)
+        public NodeId(string value)
         {
-            if (string.IsNullOrWhiteSpace(value))
-                throw new ArgumentException("Value cannot be null or whitespace.", nameof(value));
             this.value = value;
         }
 
-        public bool Equals(RaftNodeId other)
+        public bool IsNull => value == null;
+
+        public bool Equals(NodeId other)
         {
             return string.Equals(value, other.value, StringComparison.OrdinalIgnoreCase);
         }
@@ -21,7 +23,7 @@ namespace RaftCore
         public override bool Equals(object obj)
         {
             if (ReferenceEquals(null, obj)) return false;
-            return obj is RaftNodeId && Equals((RaftNodeId) obj);
+            return obj is NodeId && Equals((NodeId) obj);
         }
 
         public override int GetHashCode()
@@ -34,12 +36,12 @@ namespace RaftCore
             return value;
         }
 
-        public static bool operator ==(RaftNodeId left, RaftNodeId right)
+        public static bool operator ==(NodeId left, NodeId right)
         {
             return left.Equals(right);
         }
 
-        public static bool operator !=(RaftNodeId left, RaftNodeId right)
+        public static bool operator !=(NodeId left, NodeId right)
         {
             return !left.Equals(right);
         }

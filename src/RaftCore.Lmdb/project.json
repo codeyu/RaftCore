@@ -8,7 +8,7 @@
   "dependencies": {
     "NETStandard.Library": "1.6.0",
 
-    "Microsoft.Extensions.Logging.Abstractions": "1.0.0"
+    "RaftCore": "0.1.0-alpha-*"
   },
 
   "frameworks": {
