@@ -1,8 +1,10 @@
 ﻿using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.Extensions.Logging;
+using RaftCore.Math;
 using RaftCore.Protocol;
 using RaftCore.Storage;
 using RaftCore.Threading;
@@ -16,7 +18,10 @@ namespace RaftCore
         internal struct HandlerEntry
         {
             internal Func<ITransportRequest, bool> Condition;
-            internal Func<NodeId, ITransportRequest, ITransportResponse> Handler;
+            internal Func<NodeId, ITransportRequest,IStorageTransaction, ITransportResponse> Handler;
+            internal Func<IStorageTransaction,ITransportResponse> ErrorHandler;
+
+            internal bool IsWriting;
         }
 
         private readonly INodeIdProvider        nodeIdProvider;
@@ -63,6 +68,9 @@ namespace RaftCore
             this.logger             = logger;
             this.electionTimeout    = new Timeout(actualElectionTimeout,OnElectionTimeout);
             this.heartbeatTimeout   = new Timeout(TimeSpan.FromMilliseconds(actualElectionTimeout.TotalMilliseconds / 4.0),OnHeartbeatTimeout);
+
+            AddHandler<AppendEntriesRequest>(OnAppendEntriesReceived,transaction => new AppendEntriesResponse() { WasSuccessful = false,Term = transaction.CurrentTerm});
+            AddHandler<RequestVoteRequest>(OnRequestVoteReceived,transaction => new RequestVoteResponse() { WasGranted = false,Term = transaction.CurrentTerm});
         }
 
         public event Action<NodeId> LeaderChanged;
@@ -151,40 +159,155 @@ namespace RaftCore
             {
                 if (handler.Condition.Invoke(request))
                 {
-                    return handler.Handler.Invoke(sender, request);
+                    // Take lock
+                    using (handler.IsWriting ? (IDisposable)lockObject.AquireWrite() : lockObject.AquireRead())
+                    {
+                        using (var transaction = storage.BeginTransaction(!handler.IsWriting))
+                        {
+                            var response = handler.Handler.Invoke(sender, request, transaction);
+
+                            if (handler.IsWriting)
+                            {
+                                try
+                                {
+                                    var applyCommandBuffer = new List<ICommand>();
+
+                                    // Apply outstanding entries:
+                                    while (commitIndex > lastAppliedIndex)
+                                    {
+                                        lastAppliedIndex++;
+                                        var logEntry = transaction.GetLogEntryAt(lastAppliedIndex);
+
+                                        if (logEntry != null)
+                                        {
+                                            applyCommandBuffer.Add(logEntry.Command);
+                                        }
+                                    }
+
+                                    if (applyCommandBuffer.Any())
+                                    {
+                                        try
+                                        {
+                                            stateMachine.ApplyCommands(applyCommandBuffer);
+                                        }
+                                        catch (Exception ex)
+                                        {
+                                            logger.LogError("Error applying commands to state machine: {Exception}", ex);
+
+                                            return handler.ErrorHandler.Invoke(transaction);
+                                        }
+                                    }
+
+                                    // Update term based on request/response
+                                    UpdateCurrentTerm(transaction,request,response);
+
+                                    transaction.Commit();
+                                }
+                                catch (StorageCommitException ex)
+                                {
+                                    logger.LogError("Failed to commit to storage: {Exception}",ex);
+
+                                    return handler.ErrorHandler.Invoke(transaction);
+                                }
+                            }
+                        }
+                    }
                 }
             }
 
             return null;
         }
 
-        private ITransportRequest OnAppendEntriesReceived(NodeId sender, AppendEntriesRequest request)
+        private ITransportResponse OnAppendEntriesReceived(NodeId sender, AppendEntriesRequest request,IStorageTransaction transaction)
         {
-            using (lockObject.AquireWrite())
+            var currentTerm = transaction.CurrentTerm;
+
+            if (currentRole == NodeRole.Candidate)
             {
-                if (currentRole == NodeRole.Candidate)
+                electionTimeout.Stop();
+                OnLeaderChanged(request.LeaderId);
+                ConvertToFollower(transaction);
+            }
+
+            if (currentRole == NodeRole.Follower)
+            {
+                if (request.Term < currentTerm)
                 {
-                    ConvertToFollower();
+                    return new AppendEntriesResponse() {WasSuccessful = false, Term = currentTerm};
                 }
 
-                if (currentRole == NodeRole.Follower)
+                var prevLogEntry = transaction.GetLogEntryAt(request.PreviousLogIndex);
+
+                if (prevLogEntry != null && prevLogEntry.Term != request.PreviousLogTerm)
                 {
-                    
+                    return new AppendEntriesResponse() {WasSuccessful = false, Term = currentTerm};
                 }
 
+                var lastNewLogIndex = long.MaxValue;
 
-                if (currentRole == NodeRole.Leader)
+                for (long i = 0; i < request.Entries.LongCount(); i++)
                 {
-                    
+                    var targetIndex = i + request.PreviousLogIndex + 1;
+                    var logEntry = request.Entries.ElementAt((int)i);
+                    var existingLogEntry = transaction.GetLogEntryAt(targetIndex);
+
+                    if (existingLogEntry != null)
+                    {
+                        if (existingLogEntry.Term != logEntry.Term)
+                        {
+                            transaction.DeleteLogEntriesStartingAt(i);
+                        }
+                    }
+                    else
+                    {
+                        transaction.InsertLogEntry(targetIndex,logEntry);
+                        lastNewLogIndex = targetIndex;
+                    }
+                }
+
+                if (request.LeaderCommitIndex > commitIndex)
+                {
+                    commitIndex = System.Math.Min(request.LeaderCommitIndex, lastNewLogIndex);
+                }
+
+                return new AppendEntriesResponse() {WasSuccessful = true, Term = currentTerm};
+            }
+
+            if (currentRole == NodeRole.Leader)
+            {
+                logger.LogWarning("Received AppendEntries, event though leader");
+            }
+
+            return new AppendEntriesResponse() {WasSuccessful = false, Term = currentTerm};
+        }
+
+        private ITransportResponse OnRequestVoteReceived(NodeId sender, RequestVoteRequest request,IStorageTransaction transaction)
+        {
+            var currentTerm = transaction.CurrentTerm;
+
+            if (currentTerm >= request.Term && 
+                (transaction.VotedFor.IsNull || transaction.VotedFor == request.CandidateId) &&
+                IsCandidateAtLeastAsUpdateToDateAsThis(transaction,request))
+            {
+                logger.LogInformation("Granting vote to: {Candidate}",request.CandidateId);
+
+                transaction.VotedFor = request.CandidateId;
+
+                try
+                {
+                    transaction.Commit();
+                    electionTimeout.Stop();
+
+                    return new RequestVoteResponse() { Term = currentTerm, WasGranted = true };
+                }
+                catch (StorageCommitException ex)
+                {
+                    logger.LogError("Unable to commit vote: {Exception}", ex);
                 }
             }
 
-            return null;
-        }
-
-        private ITransportResponse OnRequestVoteReceived(NodeId sender, RequestVoteRequest request)
-        {
-            return null;
+            logger.LogInformation("Refusing vote for: {Candidate}",request.CandidateId);
+            return new RequestVoteResponse() {Term = currentTerm, WasGranted = false};    
         }
 
         private void OnLeaderChanged(NodeId newLeader)
@@ -206,9 +329,11 @@ namespace RaftCore
             OnLeaderChanged(nodeIdProvider.LocalNodeId);
         }
 
-        private void ConvertToFollower()
+        private void ConvertToFollower(IStorageTransaction transaction)
         {
             logger.LogInformation("Converting to follower");
+
+            transaction.VotedFor = NodeId.Null;
         }
 
         private void StartElection()
@@ -222,22 +347,96 @@ namespace RaftCore
                 transaction.VotedFor = nodeIdProvider.LocalNodeId;
                 receivedVoteCount = 1;
 
-                electionTimeout.Reset();
+                electionTimeout.Start();
 
-           
                 transaction.Commit();
+
+                var startedTerm = transaction.CurrentTerm;
+                var lastLogEntry = transaction.GetLastLogEntry();
+                var remoteNodeIds = transport.RemoteNodes.Select(n => n.Id).ToList();
+
+                transport.Broadcast<RequestVoteResponse>(remoteNodeIds,new RequestVoteRequest()
+                    {
+                        CandidateId = nodeIdProvider.LocalNodeId,
+                        LastLogIndex = transaction.GetLastLogIndex(),
+                        Term = startedTerm,
+                        LastLogTerm = lastLogEntry?.Term ?? 0,
+                    }, (voterId,response) =>
+                    {
+                        if (response.Term == startedTerm)
+                        {
+                            // Accept vote:
+                            receivedVoteCount++;
+
+                            if (receivedVoteCount >= remoteNodeIds.Count().GetMajorityCount())
+                            {
+                                electionTimeout.Stop();
+                                ConvertToLeader();
+                            }
+                        }
+                    },
+                    (voterId, ex) =>
+                    {
+                        
+                    },CancellationToken.None);
             }
 
         }
 
-        private void AddHandler<T>(Func<NodeId, T, ITransportResponse> handler)
+        private void UpdateCurrentTerm(IStorageTransaction transaction,ITransportRequest request, ITransportResponse response)
+        {
+            var requestTerm = (request as ICarryTermUpdate)?.Term ?? 0;
+            var responseTerm = (response as ICarryTermUpdate)?.Term ?? 0;
+
+            var maxTerm = System.Math.Max(responseTerm, requestTerm);
+
+            if (maxTerm > transaction.CurrentTerm)
+            {
+                transaction.CurrentTerm = maxTerm;
+             
+                ConvertToFollower(transaction);
+            }
+        }
+
+        private bool IsCandidateAtLeastAsUpdateToDateAsThis(IStorageTransaction transaction, RequestVoteRequest request)
+        {
+            var lastEntry = transaction.GetLastLogEntry();
+
+            if (lastEntry == null)
+            {
+                return true;
+            }
+            else
+            {
+                if (request.LastLogTerm >= lastEntry.Term)
+                {
+                    return true;
+                }
+
+                if (request.LastLogTerm == lastEntry.Term)
+                {
+                    if (request.LastLogIndex >= transaction.GetLastLogIndex())
+                    {
+                        return true;
+                    }
+                }
+            }
+
+            return false;
+        }
+
+        private void AddHandler<T>(Func<NodeId, T,IStorageTransaction,ITransportResponse> handler,Func<IStorageTransaction,ITransportResponse> errorHandler = null)
             where T : ITransportRequest
         {
+            if (handler == null) throw new ArgumentNullException(nameof(handler));
+
             handlers.Add(new HandlerEntry()
             {
                 Condition = r => r is T,
-                Handler = (sender,request) => handler.Invoke(sender,(T)request)
-            });   
+                Handler = (sender,request,transaction) => handler.Invoke(sender,(T)request,transaction),
+                ErrorHandler = errorHandler,
+                IsWriting = errorHandler != null
+            });
         }
     }
 }

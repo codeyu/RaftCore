@@ -5,8 +5,13 @@ using System.Threading.Tasks;
 
 namespace RaftCore.Protocol
 {
-    internal interface ICarryTerm
+    internal interface ICarryTermUpdate
     {
         long Term { get; }
+    }
+
+    internal static class CarryTermExtensions
+    {
+        
     }
 }

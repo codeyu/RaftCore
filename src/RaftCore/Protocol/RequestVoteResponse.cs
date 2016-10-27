@@ -2,7 +2,7 @@
 
 namespace RaftCore.Protocol
 {
-    internal class RequestVoteResponse : ITransportResponse,ICarryTerm
+    internal class RequestVoteResponse : ITransportResponse,ICarryTermUpdate
     {
         public long Term { get; set; }
 

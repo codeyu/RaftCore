@@ -19,7 +19,7 @@ namespace RaftCore.Transport
 
     public interface ITransport
     {
-        IEnumerable<NodeId>         Nodes { get; }
+        IEnumerable<NodeStatus>     RemoteNodes { get; }
             
         IDisposable                 Listen(TransportRequestProcessingDelegate requestDelegate);
 

@@ -4,7 +4,7 @@ using RaftCore.Transport;
 
 namespace RaftCore.Protocol
 {
-    internal sealed class AppendEntriesRequest : ITransportRequest,ICarryTerm
+    internal sealed class AppendEntriesRequest : ITransportRequest,ICarryTermUpdate
     {
         public long Term { get; set; }
 

@@ -8,26 +8,27 @@ namespace RaftCore.Transport
 {
     internal static class TransportExtensions
     {
-        internal static async Task<IReadOnlyDictionary<NodeId,ITransportResponse>>  BroadcastToOthers(this ITransport transport, ITransportRequest request,CancellationToken cancellationToken)
+        internal static async Task<IReadOnlyDictionary<NodeId,ITransportResponse>>  Broadcast(this ITransport transport,IEnumerable<NodeId> nodeIds, ITransportRequest request,CancellationToken cancellationToken)
         {
             if (transport == null) throw new ArgumentNullException(nameof(transport));
+            if (nodeIds == null) throw new ArgumentNullException(nameof(nodeIds));
             if (request == null) throw new ArgumentNullException(nameof(request));
 
-            var nodeIds     = transport.Nodes.ToArray();
             var sendTasks   = nodeIds.Select(n => transport.Send(n, request, cancellationToken)).ToList();
 
             var result      = new Dictionary<NodeId,ITransportResponse>();
             var responses   = await Task.WhenAll(sendTasks);
 
-            for (var i = 0; i < nodeIds.Length; ++i)
+            for (var i = 0; i < nodeIds.Count(); ++i)
             {
-                result[nodeIds[i]] = responses[i];
+                result[nodeIds.ElementAt(i)] = responses[i];
             }
 
             return result;
         }
 
-        internal static void Broadcast(this ITransport transport,IEnumerable<NodeId> nodeIds, ITransportRequest request,Action<NodeId,ITransportResponse> successFunc,Action<NodeId,Exception> failureFunc,CancellationToken cancellationToken)
+        internal static void Broadcast<TResponse>(this ITransport transport,IEnumerable<NodeId> nodeIds, ITransportRequest request,Action<NodeId,TResponse> successFunc,Action<NodeId,Exception> failureFunc,CancellationToken cancellationToken)
+            where TResponse : ITransportResponse
         {
             if (transport == null) throw new ArgumentNullException(nameof(transport));
             if (nodeIds == null) throw new ArgumentNullException(nameof(nodeIds));
@@ -47,7 +48,7 @@ namespace RaftCore.Transport
                     }
                     else
                     {
-                        successFunc.Invoke(localNodeId,t.Result);
+                        successFunc.Invoke(localNodeId,(TResponse)t.Result);
                     }
                 }, cancellationToken);
             }

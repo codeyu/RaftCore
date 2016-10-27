@@ -53,9 +53,20 @@ namespace RaftCore.Logic
 
         internal void Start()
         {
-            this.timeStamp = Stopwatch.GetTimestamp();
+            lock (lockObject)
+            {
+                this.timeStamp = Stopwatch.GetTimestamp();
 
-            this.timer.Change(timerInterval, timerInterval);
+                this.timer.Change(timerInterval, timerInterval);
+            }
+        }
+
+        internal void Stop()
+        {
+            lock (lockObject)
+            {
+                this.timer.Change(System.Threading.Timeout.Infinite, System.Threading.Timeout.Infinite);
+            }
         }
 
         internal void Reset()

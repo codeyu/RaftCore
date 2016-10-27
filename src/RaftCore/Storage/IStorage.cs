@@ -15,11 +15,11 @@ namespace RaftCore.Storage
 
         long        GetLastLogIndex();
 
-        LogEntry    GetEntryAtIndex(long index);
+        LogEntry    GetLogEntryAt(long index);
 
-        void        DeleteEntriesStartingWithIndex(long index);
+        void        DeleteLogEntriesStartingAt(long index);
 
-        void        InsertEntry(long index, LogEntry entry);
+        void        InsertLogEntry(long index, LogEntry entry);
 
         void        Commit();
     }
