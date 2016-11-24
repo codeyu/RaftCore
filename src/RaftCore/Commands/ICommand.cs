@@ -1,4 +1,4 @@
-﻿namespace RaftCore
+﻿namespace RaftCore.Commands
 {
     public interface ICommand
     {
